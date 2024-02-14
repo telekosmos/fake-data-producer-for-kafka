@@ -1,6 +1,7 @@
 from faker import Faker
 import json
 from kafka import KafkaProducer
+import redis
 import time
 import sys
 import random
@@ -12,6 +13,7 @@ from realstockproducer import RealStockProvider
 from metricproducer import MetricProvider
 from userbets import UserBetsProvider
 from rolling import RollingProvider
+from userproducer import UserProvider, get_user_ids
 from metricadvancedproducer import MetricAdvancedProvider
 
 
@@ -23,6 +25,80 @@ MAX_ADDITIONAL_TOPPINGS_IN_PIZZA = 5
 # same results every time we execute the script
 fake = Faker()
 Faker.seed(4321)
+
+def publish_to_redis(username="",
+    password="",
+    hostname="hostname",
+    port="1234",
+    topic_name="pizza-orders",
+    nr_messages=-1,
+    max_waiting_time_in_sec=5,
+    subject="pizza",
+    dry_run=False,
+):
+    producer_cli = redis.Redis(host=hostname, port=int(port), password=password, db=0, decode_responses=True)
+    if nr_messages <= 0:
+        nr_messages = float("inf")
+    i = 0
+    Faker.seed(0)
+    
+    if subject == "stock":
+        fake.add_provider(StockProvider)
+    elif subject == "realstock":
+        fake.add_provider(RealStockProvider)
+    elif subject == "metric":
+        fake.add_provider(MetricProvider)
+    elif subject == "advancedmetric":
+        fake.add_provider(MetricAdvancedProvider)
+    elif subject == "userbehaviour":
+        fake.add_provider(UserBehaviorProvider)
+    elif subject == "bet":
+        fake.add_provider(UserBetsProvider)
+    elif subject == "rolling":
+        fake.add_provider(RollingProvider)
+    elif subject == "user":
+        fake.add_provider(UserProvider)
+    else:
+        fake.add_provider(PizzaProvider)
+        
+    print("Sending {} messages to {}".format(nr_messages, topic_name))
+    while i < nr_messages:
+        if subject in [
+            "stock",
+            # "userbehaviour",
+            "realstock",
+            "metric",
+            "bet",
+            "rolling",
+            "advancedmetric"
+        ]:
+            message, key = fake.produce_msg()
+        elif subject == "user":
+            message, key = fake.produce_msg(fake)
+        elif subject == 'userbehaviour':
+            user_ids = get_user_ids()
+            print(f"Generating events over {len(user_ids)} users")
+            message, key = fake.produce_msg(user_ids if len(user_ids) > 0 else None)
+        else:
+            message, key = fake.produce_msg(
+                fake,
+                i,
+                MAX_NUMBER_PIZZAS_IN_ORDER,
+                MAX_ADDITIONAL_TOPPINGS_IN_PIZZA,
+            )
+
+        # print("Sending: {}".format(message))
+        # sending the message to Redis
+        print(f'publishing to REDIS - {str(message)} to {topic_name}')
+        if dry_run == False:
+          producer_cli.publish(topic_name, str(message))
+        # Sleeping time
+        sleep_time = (
+            random.randint(0, int(max_waiting_time_in_sec * 10000)) / 10000
+        )
+        print("Sleeping for..." + str(sleep_time) + "s")
+        time.sleep(sleep_time)
+        i += 1
 
 
 # function produce_msgs starts producing messages with Faker
@@ -38,6 +114,7 @@ def produce_msgs(
     nr_messages=-1,
     max_waiting_time_in_sec=5,
     subject="pizza",
+    dry_run=False
 ):
     if security_protocol.upper() == "PLAINTEXT":
         producer = KafkaProducer(
@@ -73,7 +150,8 @@ def produce_msgs(
     if nr_messages <= 0:
         nr_messages = float("inf")
     i = 0
-
+    Faker.seed(0)
+    
     if subject == "stock":
         fake.add_provider(StockProvider)
     elif subject == "realstock":
@@ -88,19 +166,29 @@ def produce_msgs(
         fake.add_provider(UserBetsProvider)
     elif subject == "rolling":
         fake.add_provider(RollingProvider)
+    elif subject == "user":
+        fake.add_provider(UserProvider)
     else:
         fake.add_provider(PizzaProvider)
+        
+    print("Sending messages to {}".format(topic_name))
     while i < nr_messages:
         if subject in [
             "stock",
-            "userbehaviour",
+            # "userbehaviour",
             "realstock",
             "metric",
             "bet",
             "rolling",
-            "advancedmetric",
+            "advancedmetric"
         ]:
             message, key = fake.produce_msg()
+        elif subject == "user":
+            message, key = fake.produce_msg(fake)
+        elif subject == 'userbehaviour':
+            user_ids = get_user_ids()
+            print(f"Generating events over {len(user_ids)} users")
+            message, key = fake.produce_msg(user_ids if len(user_ids) > 0 else None)
         else:
             message, key = fake.produce_msg(
                 fake,
@@ -111,7 +199,8 @@ def produce_msgs(
 
         print("Sending: {}".format(message))
         # sending the message to Kafka
-        producer.send(topic_name, key=key, value=message)
+        if dry_run == False:
+          producer.send(topic_name, key=key, value=message)
         # Sleeping time
         sleep_time = (
             random.randint(0, int(max_waiting_time_in_sec * 10000)) / 10000
@@ -133,6 +222,18 @@ def produce_msgs(
 
 def main():
     parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--broker",
+        help="""Broker (kafka, redis)).
+                Parameters needed for redis: --username, --hostname, --port, --topic-name [,--password]
+                Parameters needed for kafka: --hostname, --port, --topic-name, --security-protocol""",
+        required=True,
+    )
+    parser.add_argument(
+        "--dry-run",
+        help="Don't actually publish any message, just simulate",
+        default=False
+    )
     parser.add_argument(
         "--security-protocol",
         help="""Security protocol for Kafka
@@ -190,6 +291,11 @@ def main():
                 pizza is the default""",
         required=False,
     )
+    parser.add_argument(
+        "--topic-name",
+        help="Explicitily send messages to this topic name",
+        required=False
+    )
     args = parser.parse_args()
     p_security_protocol = args.security_protocol
     p_cert_folder = args.cert_folder
@@ -198,21 +304,35 @@ def main():
     p_sasl_mechanism = args.sasl_mechanism
     p_hostname = args.host
     p_port = args.port
-    p_topic_name = args.topic_name
     p_subject = args.subject
-    produce_msgs(
-        security_protocol=p_security_protocol,
-        cert_folder=p_cert_folder,
-        username=p_username,
-        password=p_password,
-        hostname=p_hostname,
-        port=p_port,
-        topic_name=p_topic_name,
-        nr_messages=int(args.nr_messages),
-        max_waiting_time_in_sec=float(args.max_waiting_time),
-        subject=p_subject,
-        sasl_mechanism=p_sasl_mechanism,
-    )
+    p_topic_name = args.topic_name
+    if str.lower(args.broker) == 'kafka':
+      produce_msgs(
+          security_protocol=p_security_protocol,
+          cert_folder=p_cert_folder,
+          username=p_username,
+          password=p_password,
+          hostname=p_hostname,
+          port=p_port,
+          topic_name=p_topic_name,
+          nr_messages=int(args.nr_messages),
+          max_waiting_time_in_sec=float(args.max_waiting_time),
+          subject=p_subject,
+          sasl_mechanism=p_sasl_mechanism,
+          dry_run=args.dry_run,
+      )
+    else:
+      publish_to_redis(
+          username=p_username,
+          password=p_password,
+          hostname=p_hostname,
+          port=p_port,
+          topic_name=p_topic_name,
+          nr_messages=int(args.nr_messages),
+          max_waiting_time_in_sec=float(args.max_waiting_time),
+          subject=p_subject,
+          dry_run=args.dry_run,
+      )
     print(args.nr_messages)
 
 
