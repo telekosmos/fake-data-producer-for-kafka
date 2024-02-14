@@ -225,6 +225,10 @@ Sending: {'hostname': 'hostname58818', 'cpu': 'cpu15', 'usage': 87.8367169647086
 {'user_id': 1, 'item_id': 23, 'behavior': 'buy', 'view_id': None, 'group_name': 'B', 'occurred_at': '2021-10-14 16:24:56'}
 ```
 
+> **Note**
+>
+>**Custom** user behaeviour data relies now on having an _user profile_ in a mongo database to generate more _realistic_ user behaviours and being able to do further analytics on it and realting behaviours with users. So, in order to process, you first should generate a bunch of users in a mongo server of your choice in a collection called `user_profile`. You can reach this one by using a consumer for user data to save the messages in a mongo collection. Refer to [userproducer.py](userproducer.py) and/or [userbehaviorproducer.py](userbehaviorproducer.py) to get an exact view about the process.
+
 * fake `stock` data
 
 ```
